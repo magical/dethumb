@@ -450,6 +450,10 @@ func formatLoadImmed(w io.Writer, a int, v uint32) {
 	d := Reg(extract(v, 0, 2))
 	b := Reg(extract(v, 3, 5))
 	n := Immed(extract(v, 6, 10))
+	switch a {
+	case ALDR, ASTR: n *= 4
+	case ALDRH, ASTRH: n *= 2
+	}
 	if n == 0 {
 		fmt.Fprintf(w, "%s,[%s]", d, b)
 	} else {
