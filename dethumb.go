@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -378,22 +379,6 @@ func signextend(v uint32, n uint) uint32 {
 	return uint32(int32(v<<(32-n))>>(32-n))
 }
 
-// Flow analysis:
-// If link branch, stop.
-// If conditional branch, append to branchlist. Add backpointer.
-// If unconditional branch, same, and stop.
-
-type Node struct {
-	Addr int // Addr is the address of the node
-	A int // A is the type of instruction
-	W uint32 // W is the whole instruction
-	To *Node // To records the node which this node branches to
-	From []*Node // From records the nodes which can branch to this node
-	D int // D is the destination register
-	M, N int // M and N are source registers
-	I int // I is an immediate value
-}
-
 func formatAdd3(w io.Writer, a int, v uint32) {
 	d := Reg(extract(v, 0, 2))
 	s := Reg(extract(v, 3, 5))
@@ -401,7 +386,7 @@ func formatAdd3(w io.Writer, a int, v uint32) {
 	isImmed := extract(v, 10, 10) == 1
 	if isImmed {
 		n := Immed(n)
-		fmt.Fprintf(w, "%s, %s,#%s", d, s, n)
+		fmt.Fprintf(w, "%s, %s, #%s", d, s, n)
 	} else {
 		n := Reg(n)
 		fmt.Fprintf(w, "%s, %s, %s", d, s, n)
@@ -433,7 +418,7 @@ func formatShift(w io.Writer, a int, v uint32) {
 	if shift == 0 && a != ALSL {
 		shift = 32
 	}
-	fmt.Fprintf(w, "%s, %s,#%s", d, s, shift)
+	fmt.Fprintf(w, "%s, %s, #%s", d, s, shift)
 }
 
 func formatLoadPC(w io.Writer, a int, v uint32, r io.ReaderAt, pos int64) {
@@ -444,7 +429,7 @@ func formatLoadPC(w io.Writer, a int, v uint32, r io.ReaderAt, pos int64) {
 	pos &^= 3
 	r.ReadAt(b[:], pos)
 	n := uint32(b[0]) + uint32(b[1])<<8 + uint32(b[2])<<16 + uint32(b[3])<<24
-	fmt.Fprintf(w, "%s,=%s", d, Immed(n))
+	fmt.Fprintf(w, "%s,=#%s", d, Immed(n))
 }
 
 func formatLoadSP(w io.Writer, a int, v uint32) {
@@ -490,13 +475,13 @@ func formatLoadImmed(w io.Writer, a int, v uint32) {
 	if n == 0 {
 		fmt.Fprintf(w, "%s,[%s]", d, b)
 	} else {
-		fmt.Fprintf(w, "%s,[%s,#%s]", d, b, n)
+		fmt.Fprintf(w, "%s,[%s, #%s]", d, b, n)
 	}
 }
 
 func formatLoadMultiple(w io.Writer, a int, v uint32) {
 	r := Regset(extract(v, 0, 7))
-	b := Regset(extract(v, 8, 10))
+	b := Reg(extract(v, 8, 10))
 	fmt.Fprint(w, b, "!,", r)
 }
 
@@ -516,7 +501,7 @@ func formatGoto(w io.Writer, a int, v uint32, addr uint32) {
 	fmt.Fprintf(w, "%08X", addr)
 }
 
-func formatBL(w io.Writer, a int, v uint32, addr uint32) {
+func formatCall(w io.Writer, a int, v uint32, addr uint32) {
 	offset := extract(v, 0, 10) << 1
 	offset += extract(v, 16, 26) << 12
 	addr += 4 + signextend(offset, 23)
@@ -530,6 +515,18 @@ func formatBranch(w io.Writer, a int, v uint32, addr uint32) {
 	fmt.Fprintf(w, "%08X", addr)
 }
 
+func parseBranch(a int, v uint32, addr uint32) uint32 {
+	offset := extract(v, 0, 7)
+	offset = signextend(offset, 8)
+	return addr + 4 + offset*2
+}
+
+func parseGoto(a int, v uint32, addr uint32) uint32 {
+	offset := extract(v, 0, 10)
+	offset = signextend(offset, 11)
+	return addr + 4 + offset*2
+}
+
 func formatInterrupt(w io.Writer, a int, v uint32) {
 	n := Immed(extract(v, 0, 7))
 	fmt.Fprint(w, n)
@@ -541,6 +538,31 @@ func formatBX(w io.Writer, a int, v uint32) {
 	s := extract(v, 3, 6)
 	fmt.Fprintf(w, "%s", regnames[s])
 }
+
+type Node struct {
+	Addr  uint32  // Addr is the address of the node
+	V     uint32  // W is the instruction
+	From  []*Node // From records the nodes which can branch to this node
+	To    *Node   // To records the node this node branches to
+	Dest  uint32  // Dest records the address of the node which this node branches to
+	Label string  // Label is a name for this node
+}
+
+func (n *Node) String() string {
+	return strconv.FormatUint(uint64(n.Addr), 16)
+}
+
+// Flow analysis:
+// If link branch, stop.
+// If conditional branch, append to branchlist. Add backpointer.
+// If unconditional branch, same, and stop.
+
+// NodeSlice implements sort.Interface
+type nodeSlice []*Node
+
+func (s nodeSlice) Len() int           { return len(s) }
+func (s nodeSlice) Less(i, j int) bool { return s[i].Addr < s[j].Addr }
+func (s nodeSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
 func main() {
 	filename := os.Args[1]
@@ -562,57 +584,121 @@ func main() {
 	}
 	defer f.Close()
 
-	var buf bytes.Buffer
-	var b [2]byte
+	var alist []*Node
+	var amap = make(map[uint32]*Node) // addr => instruction
+	var deferred []*Node
 	for {
+		var b [2]byte
+		var n, from *Node
+		//fmt.Println(addr, deferred, alist)
+		if addr == -1 {
+			if len(deferred) == 0 {
+				break
+			}
+			from = deferred[0]
+			deferred = append(deferred[:0], deferred[1:]...)
+			//fmt.Printf("Deferred: %08X -> %08X\n", from.Addr, from.Dest)
+			n = amap[from.Dest]
+			if n != nil {
+				//fmt.Printf("Found %08X, skipping\n", n.Addr)
+				n.From = append(n.From, from)
+				from.To = n
+				continue
+			}
+			//fmt.Printf("Didn't find %08X, adding\n", from.Dest)
+			n = new(Node)
+			n.Addr = from.Dest
+			n.From = append(n.From, from)
+			from.To = n
+			addr = int64(n.Addr)
+		} else {
+			if amap[uint32(addr)] != nil {
+				addr = -1
+				continue
+			}
+			n = new(Node)
+			n.Addr = uint32(addr)
+		}
+		alist = append(alist, n)
+		amap[n.Addr] = n
+
 		_, err = f.ReadAt(b[:], addr - base)
 		if err != nil {
 			break
 		}
-		vlen := 2
+		addr += 2
 		v := uint32(b[0]) + uint32(b[1])<<8
 		a, c := decode(v)
 		if extract(v, 11, 15) == 0x1E {
-			_, err = f.ReadAt(b[:], addr - base + 2)
+			_, err = f.ReadAt(b[:], addr - base)
 			if err != nil {
 				break
 			}
+			addr += 2
 			v = uint32(b[0]) + uint32(b[1])<<8 + v<<16
-			vlen = 4
-			fmt.Fprintf(&buf, "%08X: %08X ", addr, v)
-		} else {
-			fmt.Fprintf(&buf, "%08X: %04X     ", addr, v)
 		}
-		fmt.Fprintf(&buf, "%-7s ", anames[a])
+		n.V = v
+		switch c {
+		case Branch:
+			n.Dest = parseBranch(a, v, n.Addr)
+			deferred = append(deferred, n)
+		case Goto:
+			n.Dest = parseGoto(a, v, n.Addr)
+			deferred = append(deferred, n)
+		}
+		//fmt.Printf("%08X\n", n.Dest)
+		if isReturn(a, c, v) || c == Goto {
+			addr = -1
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	sort.Sort(nodeSlice(alist))
+	var label int
+	for _, n := range alist {
+		if len(n.From) > 0 {
+			n.Label = ".label" + strconv.Itoa(label)
+			label++
+		}
+	}
+	var buf bytes.Buffer
+	for _, n := range alist {
+		v := n.V
+		a, c := decode(n.V)
+		if n.Label != "" {
+			fmt.Fprintf(&buf, "%8s:\n", n.Label)
+		}
+		if v > 0xFFFF {
+			fmt.Fprintf(&buf, "%08X: %08X ", n.Addr, v)
+		} else {
+			fmt.Fprintf(&buf, "%08X: %04X     ", n.Addr, v)
+		}
+		fmt.Fprintf(&buf, "%-5s ", anames[a])
 		switch c {
 		case Alu: formatAlu(&buf, a, v)
 		case AluHi: formatAluHi(&buf, a, v)
 		case Add3: formatAdd3(&buf, a, v)
 		case Immed8: formatImmed8(&buf, a, v)
 		case Shift: formatShift(&buf, a, v)
-		case Call: formatBL(&buf, a, v, uint32(addr))
-		case Goto: formatGoto(&buf, a, v, uint32(addr))
-		case Branch: formatBranch(&buf, a, v, uint32(addr))
+		case Call: formatCall(&buf, a, v, n.Addr)
+		//case Goto: formatGoto(&buf, a, v, n.Addr)
+		//case Branch: formatBranch(&buf, a, v, n.Addr)
 		case BranchReg: formatBX(&buf, a, v)
 		case AddPCSP: formatAddPCSP(&buf, a, v)
 		case AddSP: formatAddSP(&buf, a, v)
-		case LoadPC: formatLoadPC(&buf, a, v, f, addr - base)
+		case LoadPC: formatLoadPC(&buf, a, v, f, int64(n.Addr) - base)
 		case LoadSP: formatLoadSP(&buf, a, v)
 		case LoadReg: formatLoadReg(&buf, a, v)
 		case LoadImmed: formatLoadImmed(&buf, a, v)
 		case LoadMultiple: formatLoadMultiple(&buf, a, v)
 		case Push: formatPush(&buf, a, v)
 		case Interrupt: formatInterrupt(&buf, a, v)
+		case Branch, Goto:
+			fmt.Fprintf(&buf, n.To.Label)
 		}
-		fmt.Fprint(&buf, "\n")
+		buf.WriteByte('\n')
 		buf.WriteTo(os.Stdout)
-		addr += int64(vlen)
-		if isReturn(a, c, v)  {
-			break
-		}
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
 	}
 }
