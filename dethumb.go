@@ -348,12 +348,15 @@ func isReturn(a int, c int, v uint32 ) bool {
 	case ABX:
 		return true
 	case AADD, AMOV:
+		// add pc, ...
+		// mov pc, ...
 		if c == AluHi {
 			d := extract(v, 0, 2)
 			d += extract(v, 7, 7)<<3
 			return d == 15
 		}
 	case APOP:
+		// pop lr
 		return extract(v, 8, 8) == 1
 	}
 	return false
@@ -426,13 +429,13 @@ func formatShift(w io.Writer, a int, v uint32) {
 	fmt.Fprintf(w, "%s, %s, %s", d, s, shift)
 }
 
-func formatLoadPC(w io.Writer, a int, v uint32, addr uint32, r io.ReaderAt) {
+func formatLoadPC(w io.Writer, a int, v uint32, r io.ReaderAt, pos int64) {
 	var b [4]byte
 	offset := extract(v, 0, 7)
 	d := Reg(extract(v, 8, 10))
-	addr += 4 + offset*4
-	addr &^= 3
-	r.ReadAt(b[:], int64(addr))
+	pos += 4 + int64(offset)*4
+	pos &^= 3
+	r.ReadAt(b[:], pos)
 	n := uint32(b[0]) + uint32(b[1])<<8 + uint32(b[2])<<16 + uint32(b[3])<<24
 	fmt.Fprintf(w, "%s,=%s", d, Immed(n))
 }
@@ -494,9 +497,8 @@ func formatBX(w io.Writer, a int, v uint32) {
 
 func main() {
 	filename := os.Args[1]
-	x, err := strconv.ParseInt(os.Args[2], 0, 32)
-	addr := int(x)
-	base := 0x8<<24
+	addr, err := strconv.ParseInt(os.Args[2], 0, 32)
+	var base int64 = 0x8<<24
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -513,27 +515,23 @@ func main() {
 	}
 	defer f.Close()
 
-	var b [2]byte
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-	}
-	var v uint32
 	var buf bytes.Buffer
+	var b [2]byte
 	for {
-		_, err = f.ReadAt(b[:], int64(addr - base))
+		_, err = f.ReadAt(b[:], addr - base)
 		if err != nil {
 			break
 		}
-		wlen := 2
-		v = uint32(b[0]) + uint32(b[1])<<8
+		vlen := 2
+		v := uint32(b[0]) + uint32(b[1])<<8
 		a, c := decode(v)
 		if extract(v, 11, 15) == 0x1E {
-			_, err = f.ReadAt(b[:], int64(addr - base + 2))
+			_, err = f.ReadAt(b[:], addr - base + 2)
 			if err != nil {
 				break
 			}
 			v = uint32(b[0]) + uint32(b[1])<<8 + v<<16
-			wlen = 4
+			vlen = 4
 			fmt.Fprintf(&buf, "%08x: %08x ", addr, v)
 		} else {
 			fmt.Fprintf(&buf, "%08x: %04x     ", addr, v)
@@ -549,18 +547,14 @@ func main() {
 		case Goto: formatGoto(&buf, a, v, uint32(addr))
 		case Branch: formatBranch(&buf, a, v, uint32(addr))
 		case BranchReg: formatBX(&buf, a, v)
-		case LoadPC: formatLoadPC(&buf, a, v, uint32(addr-base), f)
+		case LoadPC: formatLoadPC(&buf, a, v, f, addr - base)
 		case LoadReg: formatLoadReg(&buf, a, v)
 		case LoadImmed: formatLoadImmed(&buf, a, v)
 		case Push: formatPush(&buf, a, v)
 		}
 		fmt.Fprint(&buf, "\n")
 		buf.WriteTo(os.Stdout)
-		addr += wlen
-		// Return instructions:
-		// pop lr
-		// mov pc, X
-		// bx
+		addr += int64(vlen)
 		if isReturn(a, c, v)  {
 			break
 		}
