@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 )
@@ -10,12 +12,8 @@ const (
 	AUNDEF = iota
 	AADC
 	AADD
-	AADD8
-	AADDHi
-	AADDI
 	AAND
 	AASR
-	AASRI
 	AB
 	ABCC
 	ABCS
@@ -25,36 +23,29 @@ const (
 	ABHI
 	ABIC
 	ABKPT
+	ABL
 	ABLE
 	ABLS
 	ABLT
+	ABLX
 	ABMI
 	ABNE
 	ABPL
 	ABVC
 	ABVS
 	ABX
-	ABXHi
 	ACMN
 	ACMP
-	ACMP8
-	ACMPHi
 	AEOR
 	ALDR
 	ALDRB
-	ALDRBI
 	ALDRH
-	ALDRI
 	ALDRPC
 	ALDSB
 	ALDSH
 	ALSL
-	ALSLI
 	ALSR
-	ALSRI
 	AMOV
-	AMOV8
-	AMOVHi
 	AMUL
 	AMVN
 	ANEG
@@ -63,12 +54,8 @@ const (
 	ASBC
 	ASTR
 	ASTRB
-	ASTRBI
 	ASTRH
-	ASTRI
 	ASUB
-	ASUB8
-	ASUBI
 	ASWI
 	ATST
 
@@ -78,12 +65,8 @@ const (
 var anames = [AMax]string{
 	AADC: "adc",
 	AADD: "add",
-	AADD8: "add",
-	AADDHi: "add",
-	AADDI: "add",
 	AAND: "and",
 	AASR: "asr",
-	AASRI: "asr",
 	AB: "b",
 	ABCC: "blo",
 	ABCS: "bhs",
@@ -93,8 +76,10 @@ var anames = [AMax]string{
 	ABHI: "bhi",
 	ABIC: "bic",
 	ABKPT: "bkpt",
+	ABL: "bl",
 	ABLE: "ble",
 	ABLS: "bls",
+	ABLX: "blx",
 	ABLT: "blt",
 	ABMI: "bmi",
 	ABNE: "bne",
@@ -102,27 +87,17 @@ var anames = [AMax]string{
 	ABVC: "bvc",
 	ABVS: "bvs",
 	ABX: "bx",
-	ABXHi: "bx",
 	ACMN: "cmn",
-	ACMP: "cmp",
-	ACMP8: "cmp",
-	ACMPHi: "cmp",
 	AEOR: "eor",
 	ALDR: "ldr",
 	ALDRB: "ldrb",
-	ALDRBI: "ldrb",
 	ALDRH: "ldrh",
-	ALDRI: "ldr",
 	ALDRPC: "ldr",
 	ALDSB: "lds",
 	ALDSH: "lds",
 	ALSL: "lsl",
-	ALSLI: "lsl",
 	ALSR: "lsr",
-	ALSRI: "lsr",
 	AMOV: "mov",
-	AMOV8: "mov",
-	AMOVHi: "mov",
 	AMUL: "mul",
 	AMVN: "mvn",
 	ANEG: "neg",
@@ -131,45 +106,41 @@ var anames = [AMax]string{
 	ASBC: "sbc",
 	ASTR: "str",
 	ASTRB: "strb",
-	ASTRBI: "strb",
 	ASTRH: "strh",
-	ASTRI: "str",
 	ASUB: "sub",
-	ASUB8: "sub",
-	ASUBI: "sub",
 	ASWI: "swi",
 	ATST: "tst",
 	AUNDEF: "undefined",
 }
 
-func decode(w uint32) int {
+func decode(v uint32) int {
 	switch {
-	case extract(w, 11, 15) == 3:
+	case extract(v, 11, 15) == 3:
 		// THree-operand ADD/SUB with register or immediate
-		switch extract(w, 9, 10) {
+		switch extract(v, 9, 10) {
 		case 0: return AADD
 		case 1: return ASUB
-		case 2: return AADDI
-		case 3: return ASUBI
+		case 2: return AADD
+		case 3: return ASUB
 		}
-	case extract(w, 13, 15) == 0:
+	case extract(v, 13, 15) == 0:
 		// Three-operand shifts
-		switch extract(w, 11, 12) {
-		case 0: return ALSLI
-		case 1: return ALSRI
-		case 2: return AASRI
+		switch extract(v, 11, 12) {
+		case 0: return ALSL
+		case 1: return ALSR
+		case 2: return AASR
 		// case 3: add/sub
 		}
-	case extract(w, 13, 15) == 0:
+	case extract(v, 13, 15) == 0:
 		// MOVE/CMP/ADD/SUB with 8-bit immediate
-		switch extract(w, 11, 12) {
-		case 0: return AMOV8
-		case 1: return ACMP8
-		case 2: return AADD8
-		case 3: return ASUB8
+		switch extract(v, 11, 12) {
+		case 0: return AMOV
+		case 1: return ACMP
+		case 2: return AADD
+		case 3: return ASUB
 		}
-	case extract(w, 10, 15) == 0x10:
-		switch extract(w, 6, 9) {
+	case extract(v, 10, 15) == 0x10:
+		switch extract(v, 6, 9) {
 		case 0: return AAND
 		case 1: return AEOR
 		case 2: return ALSL
@@ -187,41 +158,45 @@ func decode(w uint32) int {
 		case 14: return ABIC
 		case 15: return AMVN
 		}
-	case extract(w, 10, 15) == 0x11:
-		switch extract(w, 8, 9) {
-		case 0: return AADDHi
-		case 1: return ACMPHi
-		case 2: return AMOVHi
-		case 3: return ABXHi
+	case extract(v, 10, 15) == 0x11:
+		switch extract(v, 8, 9) {
+		case 0: return AADD
+		case 1: return ACMP
+		case 2: return AMOV
 		}
-	case extract(w, 11, 15) == 0x9:
+		if extract(v, 7, 7) == 0 {
+			return ABX
+		} else {
+			return ABLX
+		}
+	case extract(v, 11, 15) == 0x9:
 		// PC-relative load
 		return ALDRPC
-	case extract(w, 12, 15) == 0x5:
-		if extract(w, 9, 9) == 0 {
-			switch extract(w, 10, 11) {
+	case extract(v, 12, 15) == 0x5:
+		if extract(v, 9, 9) == 0 {
+			switch extract(v, 10, 11) {
 			case 0: return ASTR
 			case 1: return ASTRB
 			case 2: return ALDR
 			case 3: return ALDRB
 			}
 		} else {
-			switch extract(w, 10, 11) {
+			switch extract(v, 10, 11) {
 			case 0: return ASTRH
 			case 1: return ALDSB
 			case 2: return ALDRH
 			case 3: return ALDSH
 			}
 		}
-	case extract(w, 13, 15) == 0x3:
-		switch extract(w, 11, 12) {
-		case 0: return ASTRI
-		case 1: return ALDRI
-		case 2: return ASTRBI
-		case 3: return ALDRBI
+	case extract(v, 13, 15) == 0x3:
+		switch extract(v, 11, 12) {
+		case 0: return ASTR
+		case 1: return ALDR
+		case 2: return ASTRB
+		case 3: return ALDRB
 		}
-	case extract(w, 12, 15) == 0xD:
-		switch extract(w, 8, 11) {
+	case extract(v, 12, 15) == 0xD:
+		switch extract(v, 8, 11) {
 		case 0: return ABEQ
 		case 1: return ABNE
 		case 2: return ABCS
@@ -237,18 +212,20 @@ func decode(w uint32) int {
 		case 12: return ABGT
 		case 13: return ABLE
 		case 14: return AUNDEF
-		case 15: 
-			if extract(w, 8, 15) == 0xDF {
+		case 15:
+			if extract(v, 8, 15) == 0xDF {
 				return ASWI
 			}
-			if extract(w, 8, 15) == 0xBE {
+			if extract(v, 8, 15) == 0xBE {
 				return ABKPT
 			}
 		}
-	case extract(w, 11, 15) == 0x1E:
-		return ABX
-	case extract(w, 11, 15) == 0x1C:
+	case extract(v, 11, 15) == 0x1C:
 		return AB
+	case extract(v, 11, 15) == 0x1F:
+		return ABL
+	case extract(v, 11, 15) == 0x1D:
+		return ABX
 	}
 	return AUNDEF
 }
@@ -256,11 +233,6 @@ func decode(w uint32) int {
 // Extract returns bits low..high of an integer.
 func extract(a uint32, low, high uint) uint32 {
 	return a <<  (31-high) >> (31-high+low)
-}
-
-func decodeUnconditionalBranch(w uint32) int32 {
-	off := signextend(extract(w, 0, 10), 11) * 4
-	return off
 }
 
 func signextend(v uint32, n uint) int32 {
@@ -283,10 +255,45 @@ type Node struct {
 	I int // I is an immediate value
 }
 
+func formatAlu(w io.Writer, a int, v uint32) {
+	var d, m uint32
+	if extract(v, 11, 15) == 0x3 {
+		//immediate
+	} else if extract(v, 13, 15) == 0x1 {
+		// 8-bit immediate
+	} else if extract(v, 13, 15) == 0x0 {
+		
+	} else if extract(v, 13, 15) == 0x03 {
+		// 3 op
+	} else if extract(v, 10, 15) == 0x10 {
+		// normal
+		d = extract(v, 0, 2)
+		m = extract(v, 3, 5)
+	} else if extract(v, 10, 15) == 0x11 {
+		// High registers
+	}
+	_ = d
+	_ = m
+}
+
+func formatBL(w io.Writer, a int, v uint32, addr uint32) {
+	offset := extract(v, 0, 10) << 1
+	offset += extract(v, 16, 26) << 12
+	addr += uint32(signextend(offset, 22))
+	fmt.Fprintf(w, "%08x", addr)
+}
+
+var regnames = []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp", "lr", "pc"}
+
+func formatBX(w io.Writer, a int, v uint32) {
+	s := extract(v, 3, 6)
+	fmt.Fprintf(w, "%s", regnames[s])
+}
+
 func main() {
 	filename := os.Args[1]
-	v, err := strconv.ParseInt(os.Args[2], 0, 32)
-	addr := int(v)
+	x, err := strconv.ParseInt(os.Args[2], 0, 32)
+	addr := int(x)
 	base := 0x8<<24
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -305,31 +312,47 @@ func main() {
 	defer f.Close()
 
 	var b [2]byte
-	_, err = f.Seek(int64(addr - base), 0)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	var w uint32
+	var v uint32
+	var buf bytes.Buffer
 	for {
-		_, err = f.Read(b[:])
+		_, err = f.ReadAt(b[:], int64(addr - base))
 		if err != nil {
 			break
 		}
-		w = uint32(b[0]) + uint32(b[1])<<8
-		a := decode(w)
-		if a == AB {
-			_, err = f.Read(b[:])
+		wlen := 2
+		v = uint32(b[0]) + uint32(b[1])<<8
+		a := decode(v)
+		if extract(v, 11, 15) == 0x1E {
+			_, err = f.ReadAt(b[:], int64(addr - base + 2))
 			if err != nil {
 				break
 			}
-			w = uint32(b[0]) + uint32(b[1])<<8 + w<<16
-			addr = addr
-			fmt.Printf("%08x: %08x     %s\n", addr, w, anames[a])
+			v = uint32(b[0]) + uint32(b[1])<<8 + v<<16
+			wlen = 4
+			fmt.Fprintf(&buf, "%08x: %08x ", addr, v)
 		} else {
-			fmt.Printf("%08x: %04x     %s\n", addr, w, anames[a])
+			fmt.Fprintf(&buf, "%08x: %04x     ", addr, v)
 		}
-		addr += 4
-		if a == ABX || a == ABXHi {
+		fmt.Fprintf(&buf, "%s ", anames[a])
+		switch a {
+		case AMOV, AAND, ATST, ABIC, AORR, AEOR, AADD, AADC, ASUB, ASBC, ANEG, ACMP, ACMN, AMUL:
+			formatAlu(&buf, a, v)
+		case ABL:
+			formatBL(&buf, a, v, uint32(addr))
+		case ABX, ABLX:
+			formatBX(&buf, a, v)
+		}
+		fmt.Fprint(&buf, "\n")
+		buf.WriteTo(os.Stdout)
+		addr += wlen
+		// Return instructions:
+		// pop lr
+		// mov pc, X
+		// bx
+		if a == ABX  {
 			break
 		}
 	}
