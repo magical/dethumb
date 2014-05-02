@@ -390,7 +390,7 @@ func formatAdd3(w io.Writer, a int, v uint32) {
 	d := Reg(extract(v, 0, 2))
 	s := Reg(extract(v, 3, 5))
 	n := extract(v, 6, 8)
-	isImmed := extract(v, 9, 9) == 1
+	isImmed := extract(v, 10, 10) == 1
 	if isImmed {
 		n := Immed(n)
 		fmt.Fprintf(w, "%s, %s,#%s", d, s, n)
