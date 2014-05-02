@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -51,6 +52,7 @@ const (
 	AMUL
 	AMVN
 	ANEG
+	ANOP
 	AORR
 	APOP
 	APUSH
@@ -69,6 +71,7 @@ const (
 
 const (
 	Undefined = iota
+	Nop
 
 	Add3
 	AddSP
@@ -146,6 +149,47 @@ var anames = [AMax]string{
 	AUNDEF: "undefined",
 }
 
+type Immed uint32
+
+func (n Immed) String() string {
+	s := strconv.FormatUint(uint64(n), 16)
+	s = strings.ToUpper(s)
+	if len(s) > 1 {
+		if len(s) % 2 != 0 {
+			s = "0" + s
+		}
+		s = "x" + s
+	}
+	s = "#" + s
+	return s
+}
+
+type Reg uint32
+
+func (r Reg) String() string {
+	return regnames[r]
+}
+
+type Regset uint32
+
+func (r Regset) String() string {
+	var s []byte
+	s = append(s, '{')
+	n := 0
+	for i := 0; i < 16; i++ {
+		if r&1 == 1 {
+			if n > 0 {
+				s = append(s, ',')
+			}
+			s = append(s, []byte(regnames[i])...)
+			n++
+		}
+		r >>= 1
+	}
+	s = append(s, '}')
+	return string(s)
+}
+
 func decode(v uint32) (int, int) {
 	switch {
 	case extract(v, 11, 15) == 0x3:
@@ -153,7 +197,11 @@ func decode(v uint32) (int, int) {
 		switch extract(v, 9, 10) {
 		case 0: return AADD, Add3
 		case 1: return ASUB, Add3
-		case 2: return AADD, Add3
+		case 2:
+			if extract(v, 6, 8) == 0 {
+				return AMOV, Alu
+			}
+			return AADD, Add3
 		case 3: return ASUB, Add3
 		}
 	case extract(v, 13, 15) == 0x0:
@@ -195,7 +243,11 @@ func decode(v uint32) (int, int) {
 		switch extract(v, 8, 9) {
 		case 0: return AADD, AluHi
 		case 1: return ACMP, AluHi
-		case 2: return AMOV, AluHi
+		case 2:
+			if extract(v, 0, 7) == 0xC0 {
+				return ANOP, Nop
+			}
+			return AMOV, AluHi
 		}
 		if extract(v, 7, 7) == 0 {
 			return ABX, BranchReg
@@ -332,7 +384,84 @@ type Node struct {
 	I int // I is an immediate value
 }
 
+func formatAdd3(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 0, 2))
+	s := Reg(extract(v, 3, 5))
+	n := extract(v, 6, 8)
+	isImmed := extract(v, 9, 9) == 1
+	if isImmed {
+		n := Immed(n)
+		fmt.Fprintf(w, "%s, %s, %s", d, s, n)
+	} else {
+		n := Reg(n)
+		fmt.Fprintf(w, "%s, %s, %s", d, s, n)
+	}
+}
+
 func formatAlu(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 0, 2))
+	s := Reg(extract(v, 3, 5))
+	fmt.Fprintf(w, "%s, %s", d, s)
+}
+
+func formatAluHi(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 0, 2)) + Reg(extract(v, 7, 7)<<3)
+	s := Reg(extract(v, 3, 6))
+	fmt.Fprintf(w, "%s, %s", d, s)
+}
+
+func formatImmed8(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 8, 10))
+	n := Immed(extract(v, 0, 7))
+	fmt.Fprintf(w, "%s, %s", d, n)
+}
+
+func formatShift(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 0, 2))
+	s := Reg(extract(v, 3, 5))
+	shift := Immed(extract(v, 6, 10))
+	if shift == 0 && a != ALSL {
+		shift = 32
+	}
+	fmt.Fprintf(w, "%s, %s, %s", d, s, shift)
+}
+
+func formatLoadPC(w io.Writer, a int, v uint32, addr uint32, r io.ReaderAt) {
+	var b [4]byte
+	offset := extract(v, 0, 7)
+	d := Reg(extract(v, 8, 10))
+	addr += 4 + offset*4
+	addr &^= 3
+	r.ReadAt(b[:], int64(addr))
+	n := uint32(b[0]) + uint32(b[1])<<8 + uint32(b[2])<<16 + uint32(b[3])<<24
+	fmt.Fprintf(w, "%s,=%s", d, Immed(n))
+}
+
+func formatLoadReg(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 0, 2))
+	b := Reg(extract(v, 3, 5))
+	o := Reg(extract(v, 6, 8))
+	fmt.Fprintf(w, "%s,[%s, %s]", d, b, o)
+}
+
+func formatLoadImmed(w io.Writer, a int, v uint32) {
+	d := Reg(extract(v, 0, 2))
+	b := Reg(extract(v, 3, 5))
+	n := Immed(extract(v, 6, 10))
+	if n == 0 {
+		fmt.Fprintf(w, "%s,[%s]", d, b)
+	} else {
+		fmt.Fprintf(w, "%s,[%s, %s]", d, b, n)
+	}
+}
+
+func formatPush(w io.Writer, a int, v uint32) {
+	r := extract(v, 0, 7)
+	switch a {
+	case APUSH: r += extract(v, 8, 8)<<15
+	case APOP:  r += extract(v, 8, 8)<<14
+	}
+	fmt.Fprint(w, Regset(r))
 }
 
 func formatGoto(w io.Writer, a int, v uint32, addr uint32) {
@@ -409,13 +538,21 @@ func main() {
 		} else {
 			fmt.Fprintf(&buf, "%08x: %04x     ", addr, v)
 		}
-		fmt.Fprintf(&buf, "%s ", anames[a])
+		fmt.Fprintf(&buf, "%-7s ", anames[a])
 		switch c {
 		case Alu: formatAlu(&buf, a, v)
+		case AluHi: formatAluHi(&buf, a, v)
+		case Add3: formatAdd3(&buf, a, v)
+		case Immed8: formatImmed8(&buf, a, v)
+		case Shift: formatShift(&buf, a, v)
 		case Call: formatBL(&buf, a, v, uint32(addr))
 		case Goto: formatGoto(&buf, a, v, uint32(addr))
 		case Branch: formatBranch(&buf, a, v, uint32(addr))
 		case BranchReg: formatBX(&buf, a, v)
+		case LoadPC: formatLoadPC(&buf, a, v, uint32(addr-base), f)
+		case LoadReg: formatLoadReg(&buf, a, v)
+		case LoadImmed: formatLoadImmed(&buf, a, v)
+		case Push: formatPush(&buf, a, v)
 		}
 		fmt.Fprint(&buf, "\n")
 		buf.WriteTo(os.Stdout)
