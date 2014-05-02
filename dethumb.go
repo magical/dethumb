@@ -74,6 +74,7 @@ const (
 	Nop
 
 	Add3
+	AddPCSP
 	AddSP
 	Alu
 	AluHi
@@ -244,14 +245,16 @@ func decode(v uint32) (int, int) {
 		case 1: return ACMP, AluHi
 		case 2:
 			if extract(v, 0, 7) == 0xC0 {
+				// (really mov r8, r8)
 				return ANOP, Nop
 			}
 			return AMOV, AluHi
-		}
-		if extract(v, 7, 7) == 0 {
-			return ABX, BranchReg
-		} else {
-			return ABLX, BranchReg
+		case 3:
+			if extract(v, 7, 7) == 0 {
+				return ABX, BranchReg
+			} else {
+				return ABLX, BranchReg
+			}
 		}
 	case extract(v, 11, 15) == 0x9:
 		// PC-relative load
@@ -293,13 +296,18 @@ func decode(v uint32) (int, int) {
 		case 1: return ALDR, LoadSP
 		}
 	case extract(v, 12, 15) == 0xA:
+		// Get relative address
 		switch extract(v, 11, 11) {
-		case 0: return AADD, LoadPC
-		case 1: return AADD, LoadSP
+		case 0: return AADD, AddPCSP
+		case 1: return AADD, AddPCSP
 		}
 	case extract(v, 12, 15) == 0xB:
 		switch extract(v, 8, 11) {
-		case 0: return AADD, AddSP
+		case 0:
+			switch extract(v, 7, 7) {
+			case 0: return AADD, AddSP
+			case 1: return ASUB, AddSP
+			}
 		case 4, 5: return APUSH, Push
 		case 12, 13: return APOP, Push
 		case 15: return ABKPT, Interrupt
@@ -439,6 +447,31 @@ func formatLoadPC(w io.Writer, a int, v uint32, r io.ReaderAt, pos int64) {
 	fmt.Fprintf(w, "%s,=%s", d, Immed(n))
 }
 
+func formatLoadSP(w io.Writer, a int, v uint32) {
+	n := Immed(extract(v, 0, 7)) * 4
+	d := Reg(extract(v, 8, 10))
+	if n == 0 {
+		fmt.Fprintf(w, "%s,[sp]", d)
+	} else {
+		fmt.Fprintf(w, "%s,[sp,%s]", d, n)
+	}
+}
+
+func formatAddPCSP(w io.Writer, a int, v uint32) {
+	n := Immed(extract(v, 0, 7))*4
+	d := Reg(extract(v, 8, 10))
+	b := Reg(15)
+	if extract(v, 11, 11) == 1 {
+		b = Reg(14)
+	}
+	fmt.Fprintf(w, "%s, %s,%s", d, b, n)
+}
+
+func formatAddSP(w io.Writer, a int, v uint32) {
+	n := Immed(extract(v, 0, 7)) * 4
+	fmt.Fprintf(w, "sp, %s", n)
+}
+
 func formatLoadReg(w io.Writer, a int, v uint32) {
 	d := Reg(extract(v, 0, 2))
 	b := Reg(extract(v, 3, 5))
@@ -461,6 +494,12 @@ func formatLoadImmed(w io.Writer, a int, v uint32) {
 	}
 }
 
+func formatLoadMultiple(w io.Writer, a int, v uint32) {
+	r := Regset(extract(v, 0, 7))
+	b := Regset(extract(v, 8, 10))
+	fmt.Fprint(w, b, "!,", r)
+}
+
 func formatPush(w io.Writer, a int, v uint32) {
 	r := extract(v, 0, 7)
 	switch a {
@@ -474,21 +513,26 @@ func formatGoto(w io.Writer, a int, v uint32, addr uint32) {
 	offset := extract(v, 0, 10)
 	offset = signextend(offset, 11)
 	addr += 4 + offset*2
-	fmt.Fprintf(w, "%08x", addr)
+	fmt.Fprintf(w, "%08X", addr)
 }
 
 func formatBL(w io.Writer, a int, v uint32, addr uint32) {
 	offset := extract(v, 0, 10) << 1
 	offset += extract(v, 16, 26) << 12
 	addr += 4 + signextend(offset, 23)
-	fmt.Fprintf(w, "%08x", addr)
+	fmt.Fprintf(w, "%08X", addr)
 }
 
 func formatBranch(w io.Writer, a int, v uint32, addr uint32) {
 	offset := extract(v, 0, 7)
 	offset = signextend(offset, 8)*2
 	addr += 4 + offset
-	fmt.Fprintf(w, "%08x", addr)
+	fmt.Fprintf(w, "%08X", addr)
+}
+
+func formatInterrupt(w io.Writer, a int, v uint32) {
+	n := Immed(extract(v, 0, 7))
+	fmt.Fprint(w, n)
 }
 
 var regnames = []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp", "lr", "pc"}
@@ -535,9 +579,9 @@ func main() {
 			}
 			v = uint32(b[0]) + uint32(b[1])<<8 + v<<16
 			vlen = 4
-			fmt.Fprintf(&buf, "%08x: %08x ", addr, v)
+			fmt.Fprintf(&buf, "%08X: %08X ", addr, v)
 		} else {
-			fmt.Fprintf(&buf, "%08x: %04x     ", addr, v)
+			fmt.Fprintf(&buf, "%08X: %04X     ", addr, v)
 		}
 		fmt.Fprintf(&buf, "%-7s ", anames[a])
 		switch c {
@@ -550,10 +594,15 @@ func main() {
 		case Goto: formatGoto(&buf, a, v, uint32(addr))
 		case Branch: formatBranch(&buf, a, v, uint32(addr))
 		case BranchReg: formatBX(&buf, a, v)
+		case AddPCSP: formatAddPCSP(&buf, a, v)
+		case AddSP: formatAddSP(&buf, a, v)
 		case LoadPC: formatLoadPC(&buf, a, v, f, addr - base)
+		case LoadSP: formatLoadSP(&buf, a, v)
 		case LoadReg: formatLoadReg(&buf, a, v)
 		case LoadImmed: formatLoadImmed(&buf, a, v)
+		case LoadMultiple: formatLoadMultiple(&buf, a, v)
 		case Push: formatPush(&buf, a, v)
+		case Interrupt: formatInterrupt(&buf, a, v)
 		}
 		fmt.Fprint(&buf, "\n")
 		buf.WriteTo(os.Stdout)
