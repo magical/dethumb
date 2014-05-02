@@ -160,7 +160,6 @@ func (n Immed) String() string {
 		}
 		s = "x" + s
 	}
-	s = "#" + s
 	return s
 }
 
@@ -394,7 +393,7 @@ func formatAdd3(w io.Writer, a int, v uint32) {
 	isImmed := extract(v, 9, 9) == 1
 	if isImmed {
 		n := Immed(n)
-		fmt.Fprintf(w, "%s, %s, %s", d, s, n)
+		fmt.Fprintf(w, "%s, %s,#%s", d, s, n)
 	} else {
 		n := Reg(n)
 		fmt.Fprintf(w, "%s, %s, %s", d, s, n)
@@ -416,7 +415,7 @@ func formatAluHi(w io.Writer, a int, v uint32) {
 func formatImmed8(w io.Writer, a int, v uint32) {
 	d := Reg(extract(v, 8, 10))
 	n := Immed(extract(v, 0, 7))
-	fmt.Fprintf(w, "%s, %s", d, n)
+	fmt.Fprintf(w, "%s, #%s", d, n)
 }
 
 func formatShift(w io.Writer, a int, v uint32) {
@@ -426,7 +425,7 @@ func formatShift(w io.Writer, a int, v uint32) {
 	if shift == 0 && a != ALSL {
 		shift = 32
 	}
-	fmt.Fprintf(w, "%s, %s, %s", d, s, shift)
+	fmt.Fprintf(w, "%s, %s,#%s", d, s, shift)
 }
 
 func formatLoadPC(w io.Writer, a int, v uint32, r io.ReaderAt, pos int64) {
@@ -454,7 +453,7 @@ func formatLoadImmed(w io.Writer, a int, v uint32) {
 	if n == 0 {
 		fmt.Fprintf(w, "%s,[%s]", d, b)
 	} else {
-		fmt.Fprintf(w, "%s,[%s, %s]", d, b, n)
+		fmt.Fprintf(w, "%s,[%s,#%s]", d, b, n)
 	}
 }
 
