@@ -438,7 +438,7 @@ func formatLoadSP(w io.Writer, a int, v uint32) {
 	if n == 0 {
 		fmt.Fprintf(w, "%s,[sp]", d)
 	} else {
-		fmt.Fprintf(w, "%s,[sp,%s]", d, n)
+		fmt.Fprintf(w, "%s,[sp, #%s]", d, n)
 	}
 }
 
@@ -447,14 +447,14 @@ func formatAddPCSP(w io.Writer, a int, v uint32) {
 	d := Reg(extract(v, 8, 10))
 	b := Reg(15)
 	if extract(v, 11, 11) == 1 {
-		b = Reg(14)
+		b = Reg(13)
 	}
-	fmt.Fprintf(w, "%s, %s,%s", d, b, n)
+	fmt.Fprintf(w, "%s, %s, #%s", d, b, n)
 }
 
 func formatAddSP(w io.Writer, a int, v uint32) {
-	n := Immed(extract(v, 0, 7)) * 4
-	fmt.Fprintf(w, "sp, %s", n)
+	n := Immed(extract(v, 0, 6)) * 4
+	fmt.Fprintf(w, "sp, #%s", n)
 }
 
 func formatLoadReg(w io.Writer, a int, v uint32) {
@@ -576,6 +576,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "invalid address: %#x\n", addr)
 		return
 	}
+	addr &^= 1
 
 	f, err := os.Open(filename)
 	if err != nil {
