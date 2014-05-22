@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -564,15 +565,27 @@ func (s nodeSlice) Len() int           { return len(s) }
 func (s nodeSlice) Less(i, j int) bool { return s[i].Addr < s[j].Addr }
 func (s nodeSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
+
 func main() {
-	filename := os.Args[1]
-	addr, err := strconv.ParseInt(os.Args[2], 0, 32)
-	var base int64 = 0x8<<24
+	base := flag.Int64("base", 8<<24, "address of the start of the file")
+	flag.Usage = func() {
+		fmt.Println("Usage: dethumb [options] filename address")
+		fmt.Println("Disassembles the function at the given address.")
+		fmt.Println("Options:")
+		fmt.Println("  -base=0x8000000: address of the start of the file")
+	}
+	flag.Parse()
+	if flag.NArg() != 2 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	filename := flag.Arg(0)
+	addr, err := strconv.ParseInt(flag.Arg(1), 0, 64)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	if addr < base {
+	if addr < *base {
 		fmt.Fprintf(os.Stderr, "invalid address: %#x\n", addr)
 		return
 	}
@@ -623,7 +636,7 @@ func main() {
 		alist = append(alist, n)
 		amap[n.Addr] = n
 
-		_, err = f.ReadAt(b[:], addr - base)
+		_, err = f.ReadAt(b[:], addr - *base)
 		if err != nil {
 			break
 		}
@@ -631,7 +644,7 @@ func main() {
 		v := uint32(b[0]) + uint32(b[1])<<8
 		a, c := decode(v)
 		if extract(v, 11, 15) == 0x1E {
-			_, err = f.ReadAt(b[:], addr - base)
+			_, err = f.ReadAt(b[:], addr - *base)
 			if err != nil {
 				break
 			}
@@ -689,7 +702,7 @@ func main() {
 		case BranchReg: formatBX(&buf, a, v)
 		case AddPCSP: formatAddPCSP(&buf, a, v)
 		case AddSP: formatAddSP(&buf, a, v)
-		case LoadPC: formatLoadPC(&buf, a, v, f, int64(n.Addr) - base)
+		case LoadPC: formatLoadPC(&buf, a, v, f, int64(n.Addr) - *base)
 		case LoadSP: formatLoadSP(&buf, a, v)
 		case LoadReg: formatLoadReg(&buf, a, v)
 		case LoadImmed: formatLoadImmed(&buf, a, v)
