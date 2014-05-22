@@ -1,0 +1,1 @@
+Dethumb is a THUMB disassembler. I wrote it because i was sick of objdump's ugly syntax. It disassembles one function at a time and labels branches.
