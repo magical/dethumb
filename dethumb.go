@@ -676,7 +676,7 @@ func main() {
 		} else {
 			fmt.Fprintf(&buf, "%08X: %04X     ", n.Addr, v)
 		}
-		fmt.Fprintf(&buf, "%-5s ", anames[a])
+		fmt.Fprintf(&buf, "%-6s ", anames[a])
 		switch c {
 		case Alu: formatAlu(&buf, a, v)
 		case AluHi: formatAluHi(&buf, a, v)
