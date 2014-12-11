@@ -489,8 +489,8 @@ func formatLoadMultiple(w io.Writer, a int, v uint32) {
 func formatPush(w io.Writer, a int, v uint32) {
 	r := extract(v, 0, 7)
 	switch a {
-	case APUSH: r += extract(v, 8, 8)<<15
-	case APOP:  r += extract(v, 8, 8)<<14
+	case APUSH: r += extract(v, 8, 8)<<14
+	case APOP:  r += extract(v, 8, 8)<<15
 	}
 	fmt.Fprint(w, Regset(r))
 }
